@@ -48,6 +48,7 @@ export default class SlotMachine extends Lucky {
   private endScroll: number[] = []  // 最终停止的长度
   private startTime = 0             // 开始游戏的时间
   private endTime = 0               // 开始停止的时间
+  private cacheTimer?: ReturnType<typeof setTimeout>
   // 默认顺序由 prizes 生成
   private defaultOrder: number[] = []
   /**
@@ -179,11 +180,11 @@ export default class SlotMachine extends Lucky {
     })
     // 监听 blocks 数据的变化
     this.$watch('blocks', (newData: Array<BlockType>) => {
-      this.initImageCache()
+      this.scheduleCacheReload()
     }, { deep: true })
     // 监听 prizes 数据的变化
     this.$watch('prizes', (newData: Array<PrizeType>) => {
-      this.initImageCache()
+      this.scheduleCacheReload()
     }, { deep: true })
     // 监听 prizes 数据的变化
     this.$watch('slots', (newData: Array<PrizeType>) => {
@@ -193,6 +194,17 @@ export default class SlotMachine extends Lucky {
     this.$watch('defaultConfig', () => this.draw(), { deep: true })
     this.$watch('defaultStyle', () => this.draw(), { deep: true })
     this.$watch('endCallback', () => this.init())
+  }
+
+  private scheduleCacheReload (): void {
+    if (this.cacheTimer) {
+      const clearTimer = this.config.clearTimeout || clearTimeout
+      clearTimer(this.cacheTimer)
+    }
+    const setTimer = this.config.setTimeout || setTimeout
+    this.cacheTimer = setTimer(() => {
+      this.initImageCache()
+    }, 100)
   }
 
   /**
@@ -212,28 +224,29 @@ export default class SlotMachine extends Lucky {
     config.afterInit?.call(this)
   }
 
-  private initImageCache (): Promise<void> {
-    return new Promise((resolve) => {
-      const willUpdateImgs = {
-        blocks: this.blocks.map(block => block.imgs),
-        prizes: this.prizes.map(prize => prize.imgs),
-      }
-      ;(<(keyof typeof willUpdateImgs)[]>Object.keys(willUpdateImgs)).forEach(imgName => {
-        const willUpdate = willUpdateImgs[imgName]
-        // 循环遍历所有图片
-        const allPromise: Promise<void>[] = []
-        willUpdate && willUpdate.forEach((imgs, cellIndex) => {
-          imgs && imgs.forEach((imgInfo, imgIndex) => {
-            allPromise.push(this.loadAndCacheImg(imgName, cellIndex, imgIndex))
-          })
-        })
-        Promise.all(allPromise).then(() => {
-          this.drawOffscreenCanvas()
-          this.draw()
-          resolve()
+  private async initImageCache (): Promise<void> {
+    const tasks: Array<() => Promise<void>> = []
+    const collect = (cellName: 'blocks' | 'prizes', cells: Array<BlockType | PrizeType>) => {
+      cells?.forEach((cell, cellIndex) => {
+        cell?.imgs?.forEach((imgInfo, imgIndex) => {
+          if (!imgInfo) return
+          tasks.push(() => this.loadAndCacheImg(cellName, cellIndex, imgIndex))
         })
       })
+    }
+    collect('blocks', this.blocks)
+    collect('prizes', this.prizes)
+    const concurrency = 2
+    let i = 0
+    const workers = new Array(concurrency).fill(0).map(async () => {
+      while (i < tasks.length) {
+        const job = tasks[i++]
+        await job()
+      }
     })
+    await Promise.all(workers)
+    this.drawOffscreenCanvas()
+    this.draw()
   }
 
   /**
